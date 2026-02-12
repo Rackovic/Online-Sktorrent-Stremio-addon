@@ -9,7 +9,7 @@ const builder = addonBuilder({
     id: "org.stremio.sktonline",
     version: "1.0.0",
     name: "SKTonline Online Streams",
-    description: "Priame online videá (720p/480p/360p) z online.sktorrent.eu",
+    description: "Všetky dostupné online streamy z online.sktorrent.eu",
     types: ["movie", "series"],
     catalogs: [
         { type: "movie", id: "sktonline-movie", name: "SKTonline Filmy" },
@@ -49,11 +49,18 @@ function extractFlags(title) {
     return flags;
 }
 
+/**
+ * UPRAVENÁ FUNKCIA: Teraz dynamicky spracuje akékoľvek rozlíšenie
+ */
 function formatTitle(label) {
-    const qualityIcon = /720p|HD/i.test(label) ? "🟦 HD (720p)" :
-                        /480p|SD/i.test(label) ? "🟨 SD (480p)" :
-                        /360p|LD/i.test(label) ? "🟥 LD (360p)" : label;
-    return `SKTonline ${qualityIcon}`;
+    if (/2160p|4K/i.test(label)) return "SKTonline 💎 4K (2160p)";
+    if (/1080p|FHD/i.test(label)) return "SKTonline 🟦 Full HD (1080p)";
+    if (/720p|HD/i.test(label)) return "SKTonline 🟦 HD (720p)";
+    if (/480p|SD/i.test(label)) return "SKTonline 🟨 SD (480p)";
+    if (/360p|LD/i.test(label)) return "SKTonline 🟥 LD (360p)";
+    
+    // Ak je label niečo iné alebo neznáme, vrátime ho v pôvodnom znení
+    return `SKTonline ⚪ ${label !== 'Unknown' ? label : 'Ostatné kvality'}`;
 }
 
 function formatName(fullTitle, flagsArray) {
@@ -99,9 +106,6 @@ async function searchOnlineVideos(query) {
     console.log(`[INFO] 🔍 Hľadám '${query}' na ${searchUrl}`);
     try {
         const res = await axios.get(searchUrl, { headers: commonHeaders });
-        console.log(`[DEBUG] Status: ${res.status}`);
-        console.log(`[DEBUG] HTML Snippet:`, res.data.slice(0, 300));
-
         const $ = cheerio.load(res.data);
         const links = [];
         $("a[href^='/video/']").each((i, el) => {
@@ -120,14 +124,14 @@ async function searchOnlineVideos(query) {
     }
 }
 
+/**
+ * UPRAVENÁ FUNKCIA: Teraz berie všetky <source> tagy bez obmedzenia
+ */
 async function extractStreamsFromVideoId(videoId) {
     const url = `https://online.sktorrent.eu/video/${videoId}`;
     console.log(`[DEBUG] 🔎 Načítavam detaily videa: ${url}`);
     try {
         const res = await axios.get(url, { headers: commonHeaders });
-        console.log(`[DEBUG] Status: ${res.status}`);
-        console.log(`[DEBUG] Detail HTML Snippet:`, res.data.slice(0, 300));
-
         const $ = cheerio.load(res.data);
         const sourceTags = $('video source');
         const titleText = $('title').text().trim();
@@ -136,10 +140,13 @@ async function extractStreamsFromVideoId(videoId) {
         const streams = [];
         sourceTags.each((i, el) => {
             let src = $(el).attr('src');
-            const label = $(el).attr('label') || 'Unknown';
-            if (src && src.endsWith('.mp4')) {
+            const label = $(el).attr('label') || 'Viac kvalít';
+            
+            // Berieme MP4 ale aj iné formáty ak by sa objavili
+            if (src) {
                 src = src.replace(/([^:])\/\/+/, '$1/');
-                console.log(`[DEBUG] 🎞️ ${label} stream URL: ${src}`);
+                console.log(`[DEBUG] 🎞️ Nájdený stream [${label}]: ${src}`);
+                
                 streams.push({
                     title: formatName(titleText, flags),
                     name: formatTitle(label),
@@ -189,9 +196,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
     }
 
     let allStreams = [];
-    let attempt = 1;
     for (const q of queries) {
-        console.log(`[DEBUG] 🔍 Pokus ${attempt++}: '${q}'`);
         const videoIds = await searchOnlineVideos(q);
         for (const vid of videoIds) {
             const streams = await extractStreamsFromVideoId(vid);
@@ -200,15 +205,12 @@ builder.defineStreamHandler(async ({ type, id }) => {
         if (allStreams.length > 0) break;
     }
 
-    console.log(`[INFO] 📤 Odosielam ${allStreams.length} streamov do Stremio`);
     return { streams: allStreams };
 });
 
 builder.defineCatalogHandler(({ type, id }) => {
-    console.log(`[DEBUG] 📚 Katalóg požiadavka pre typ='${type}' id='${id}'`);
     return { metas: [] };
 });
 
-console.log("📦 Manifest:", builder.getInterface().manifest);
 serveHTTP(builder.getInterface(), { port: 7000 });
 console.log("🚀 SKTonline Online addon beží na http://localhost:7000/manifest.json");
