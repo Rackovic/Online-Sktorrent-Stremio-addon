@@ -7,9 +7,9 @@ const { decode } = require("entities");
 
 const builder = addonBuilder({
     id: "org.stremio.sktonline",
-    version: "1.0.0",
+    version: "1.0.1",
     name: "SKTonline Online Streams",
-    description: "Všetky dostupné online streamy z online.sktorrent.eu",
+    description: "Všetky dostupné online streamy (4K/1080p/720p/...) z online.sktorrent.eu",
     types: ["movie", "series"],
     catalogs: [
         { type: "movie", id: "sktonline-movie", name: "SKTonline Filmy" },
@@ -20,7 +20,7 @@ const builder = addonBuilder({
 });
 
 const commonHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept-Encoding': 'identity'
 };
 
@@ -49,18 +49,13 @@ function extractFlags(title) {
     return flags;
 }
 
-/**
- * UPRAVENÁ FUNKCIA: Teraz dynamicky spracuje akékoľvek rozlíšenie
- */
 function formatTitle(label) {
     if (/2160p|4K/i.test(label)) return "SKTonline 💎 4K (2160p)";
     if (/1080p|FHD/i.test(label)) return "SKTonline 🟦 Full HD (1080p)";
     if (/720p|HD/i.test(label)) return "SKTonline 🟦 HD (720p)";
     if (/480p|SD/i.test(label)) return "SKTonline 🟨 SD (480p)";
     if (/360p|LD/i.test(label)) return "SKTonline 🟥 LD (360p)";
-    
-    // Ak je label niečo iné alebo neznáme, vrátime ho v pôvodnom znení
-    return `SKTonline ⚪ ${label !== 'Unknown' ? label : 'Ostatné kvality'}`;
+    return `SKTonline ⚪ ${label !== 'Unknown' ? label : 'Všetky kvality'}`;
 }
 
 function formatName(fullTitle, flagsArray) {
@@ -75,14 +70,7 @@ function formatName(fullTitle, flagsArray) {
 async function getTitleFromIMDb(imdbId) {
     try {
         const url = `https://www.imdb.com/title/${imdbId}/`;
-        console.log(`[DEBUG] 🌐 IMDb Request: ${url}`);
-        const res = await axios.get(url, { headers: commonHeaders });
-
-        if (res.status === 404) {
-            console.error("[ERROR] IMDb scraping zlyhal: stránka neexistuje (404)");
-            return null;
-        }
-
+        const res = await axios.get(url, { headers: commonHeaders, timeout: 5000 });
         const $ = cheerio.load(res.data);
         const titleRaw = $('title').text().split(' - ')[0].trim();
         const title = decode(titleRaw);
@@ -92,8 +80,6 @@ async function getTitleFromIMDb(imdbId) {
             const json = JSON.parse(ldJson);
             if (json && json.name) originalTitle = decode(json.name.trim());
         }
-
-        console.log(`[DEBUG] 🎬 IMDb title: ${title}, original: ${originalTitle}`);
         return { title, originalTitle };
     } catch (err) {
         console.error("[ERROR] IMDb scraping zlyhal:", err.message);
@@ -103,9 +89,8 @@ async function getTitleFromIMDb(imdbId) {
 
 async function searchOnlineVideos(query) {
     const searchUrl = `https://online.sktorrent.eu/search/videos?search_query=${encodeURIComponent(query)}`;
-    console.log(`[INFO] 🔍 Hľadám '${query}' na ${searchUrl}`);
     try {
-        const res = await axios.get(searchUrl, { headers: commonHeaders });
+        const res = await axios.get(searchUrl, { headers: commonHeaders, timeout: 5000 });
         const $ = cheerio.load(res.data);
         const links = [];
         $("a[href^='/video/']").each((i, el) => {
@@ -115,38 +100,28 @@ async function searchOnlineVideos(query) {
                 if (match) links.push(match[1]);
             }
         });
-
-        console.log(`[INFO] 📺 Nájdených videí: ${links.length}`);
         return links;
     } catch (err) {
-        console.error("[ERROR] ❌ Vyhľadávanie online videí zlyhalo:", err.message);
+        console.error("[ERROR] ❌ Vyhľadávanie zlyhalo:", err.message);
         return [];
     }
 }
 
-/**
- * UPRAVENÁ FUNKCIA: Teraz berie všetky <source> tagy bez obmedzenia
- */
 async function extractStreamsFromVideoId(videoId) {
     const url = `https://online.sktorrent.eu/video/${videoId}`;
-    console.log(`[DEBUG] 🔎 Načítavam detaily videa: ${url}`);
     try {
-        const res = await axios.get(url, { headers: commonHeaders });
+        const res = await axios.get(url, { headers: commonHeaders, timeout: 5000 });
         const $ = cheerio.load(res.data);
         const sourceTags = $('video source');
         const titleText = $('title').text().trim();
         const flags = extractFlags(titleText);
-
         const streams = [];
+
         sourceTags.each((i, el) => {
             let src = $(el).attr('src');
-            const label = $(el).attr('label') || 'Viac kvalít';
-            
-            // Berieme MP4 ale aj iné formáty ak by sa objavili
+            const label = $(el).attr('label') || 'Video';
             if (src) {
                 src = src.replace(/([^:])\/\/+/, '$1/');
-                console.log(`[DEBUG] 🎞️ Nájdený stream [${label}]: ${src}`);
-                
                 streams.push({
                     title: formatName(titleText, flags),
                     name: formatTitle(label),
@@ -154,14 +129,17 @@ async function extractStreamsFromVideoId(videoId) {
                 });
             }
         });
-
-        console.log(`[INFO] ✅ Našiel som ${streams.length} streamov pre videoId=${videoId}`);
         return streams;
     } catch (err) {
-        console.error("[ERROR] ❌ Chyba pri načítaní detailu videa:", err.message);
         return [];
     }
 }
+
+// OPRAVA: Handler musí byť async alebo vracať Promise.resolve
+builder.defineCatalogHandler(async ({ type, id }) => {
+    console.log(`[DEBUG] 📚 Katalóg požiadavka pre typ='${type}' id='${id}'`);
+    return { metas: [] }; 
+});
 
 builder.defineStreamHandler(async ({ type, id }) => {
     console.log(`\n====== 🎮 STREAM požiadavka: type='${type}', id='${id}' ======`);
@@ -174,24 +152,16 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
     const { title, originalTitle } = titles;
     const queries = new Set();
+    const cleanTitles = [title, originalTitle].map(t => t.replace(/\(.*?\)/g, '').trim());
 
-    const baseTitles = [title, originalTitle].map(t => t.replace(/\(.*?\)/g, '').trim());
-    for (const base of baseTitles) {
+    for (const base of cleanTitles) {
         const noDia = removeDiacritics(base);
-        const short = shortenTitle(noDia);
-        const short1 = shortenTitle(noDia, 1);
-
         if (type === 'series' && season && episode) {
-            const epTag1 = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
-            const epTag2 = `${season}x${episode}`;
-            [base, noDia, short, short1].forEach(b => {
-                queries.add(`${b} ${epTag1}`);
-                queries.add(`${b} ${epTag2}`);
-            });
+            queries.add(`${noDia} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`);
+            queries.add(`${noDia} ${season}x${episode}`);
         } else {
-            [base, noDia, short].forEach(b => {
-                queries.add(b);
-            });
+            queries.add(noDia);
+            queries.add(shortenTitle(noDia, 2));
         }
     }
 
@@ -205,12 +175,8 @@ builder.defineStreamHandler(async ({ type, id }) => {
         if (allStreams.length > 0) break;
     }
 
+    console.log(`[INFO] 📤 Odosielam ${allStreams.length} streamov.`);
     return { streams: allStreams };
 });
 
-builder.defineCatalogHandler(({ type, id }) => {
-    return { metas: [] };
-});
-
 serveHTTP(builder.getInterface(), { port: 7000 });
-console.log("🚀 SKTonline Online addon beží na http://localhost:7000/manifest.json");
