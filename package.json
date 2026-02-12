@@ -4,6 +4,7 @@
   "description": "Stremio addon for online streaming from online.sktorrent.eu",
   "main": "online-sktorrent-addon.js",
   "scripts": {
+    "start": "node online-sktorrent-addon.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
