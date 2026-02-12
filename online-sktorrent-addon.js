@@ -5,7 +5,7 @@ const cheerio = require("cheerio");
 // 1. Definícia Addonu a Manifestu
 const builder = addonBuilder({
     id: "org.stremio.sktonline",
-    version: "1.1.3",
+    version: "1.1.4",
     name: "SKTonline Online Streams",
     description: "Všetky dostupné formáty a kvality z online.sktorrent.eu",
     types: ["movie", "series"],
@@ -21,7 +21,6 @@ const builder = addonBuilder({
     idPrefixes: ["tt"]
 });
 
-// Základná konfigurácia pre HTTP požiadavky
 const commonHeaders = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -38,18 +37,22 @@ function getFlags(text) {
     return flags;
 }
 
-function removeDiacritics(str) {
-    return str ? str.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase() : "";
+function cleanMovieTitle(title) {
+    return title
+        .split(':')[0]             // Odstráni všetko za dvojbodkou
+        .split(' (')[0]            // Odstráni rok v zátvorke
+        .replace(/[^\w\s]/gi, '') // Odstráni špeciálne znaky
+        .trim();
 }
 
 async function getIMDbName(id) {
     try {
         const res = await axios.get(`https://www.imdb.com/title/${id}/`, { headers: commonHeaders, timeout: 5000 });
         const $ = cheerio.load(res.data);
+        // Získame čistý názov z <title> tagu
         const titleRaw = $('title').text().split(' (')[0].trim();
         return titleRaw;
     } catch (e) { 
-        console.log(`[IMDb ERROR] Nepodarilo sa získať názov pre ${id}`);
         return null; 
     }
 }
@@ -73,7 +76,6 @@ async function searchOnlineVideos(query) {
         });
         return results;
     } catch (e) { 
-        console.log(`[SEARCH ERROR] ${e.message}`);
         return []; 
     }
 }
@@ -86,7 +88,6 @@ async function extractAllFormats(videoId, pageTitle) {
         const streams = [];
         const flags = getFlags(pageTitle);
 
-        // A. Zdroje z HTML5 prehrávača
         $('video source').each((i, el) => {
             const src = $(el).attr('src');
             const label = $(el).attr('label') || $(el).attr('res') || 'Video';
@@ -99,7 +100,6 @@ async function extractAllFormats(videoId, pageTitle) {
             }
         });
 
-        // B. Odkazy na stiahnutie (všetky formáty)
         $('a[href*="get_video"]').each((i, el) => {
             const href = $(el).attr('href');
             const text = $(el).text().trim().replace('Stiahnuť video', '').trim();
@@ -120,47 +120,44 @@ async function extractAllFormats(videoId, pageTitle) {
 
 // 2. Stream Handler
 builder.defineStreamHandler(async ({ id }) => {
-    console.log(`[STREAM REQ] Požiadavka pre ID: ${id}`);
+    console.log(`[STREAM REQ] ID: ${id}`);
     const imdbId = id.split(":")[0];
     const movieName = await getIMDbName(imdbId);
     
     if (!movieName) return { streams: [] };
 
-    const cleanTitle = removeDiacritics(movieName);
-    let videos = await searchOnlineVideos(cleanTitle);
+    // Vytvoríme zoznam pokusov o hľadanie
+    const searchAttempts = new Set();
+    searchAttempts.add(cleanMovieTitle(movieName)); // Napr. "Zootropolis"
     
-    // Fallback: Ak je to Zootopia, skús Zootropolis
-    if (videos.length === 0 && cleanTitle.includes("zootopia")) {
-        console.log("[FALLBACK] Skúšam hľadať 'zootropolis'...");
-        videos = await searchOnlineVideos("zootropolis");
+    // Ak je to Zootropolis/Zootopia, pridáme obe verzie
+    if (movieName.toLowerCase().includes("zootop")) {
+        searchAttempts.add("Zootropolis");
+        searchAttempts.add("Zootopia");
     }
 
-    // Fallback: Ak nič nenašlo, skús len prvé slovo
-    if (videos.length === 0) {
-        const firstWord = cleanTitle.split(' ')[0];
-        if (firstWord.length > 3) {
-            console.log(`[FALLBACK] Skúšam hľadať len: ${firstWord}`);
-            videos = await searchOnlineVideos(firstWord);
-        }
+    let allVideos = [];
+    for (const query of searchAttempts) {
+        const found = await searchOnlineVideos(query);
+        allVideos.push(...found);
+        if (allVideos.length > 5) break; // Ak máme dosť výsledkov, nejdeme ďalej
     }
 
     let allStreams = [];
-    for (const vid of videos.slice(0, 3)) {
+    // Prejdeme nájdené videá (max 5 najrelevantnejších)
+    for (const vid of allVideos.slice(0, 5)) {
         const found = await extractAllFormats(vid.id, vid.title);
         allStreams.push(...found);
     }
 
-    // Odstránenie duplicít
     const uniqueStreams = allStreams.filter((v, i, a) => a.findIndex(t => (t.url === v.url)) === i);
     
-    console.log(`[SUCCESS] Odosielam ${uniqueStreams.length} streamov.`);
+    console.log(`[SUCCESS] Odosielam ${uniqueStreams.length} streamov pre: ${movieName}`);
     return { streams: uniqueStreams };
 });
 
-// 3. Catalog Handler
 builder.defineCatalogHandler(() => Promise.resolve({ metas: [] }));
 
-// 4. Spustenie servera
 const port = process.env.PORT || 10000;
 serveHTTP(builder.getInterface(), { port });
 
