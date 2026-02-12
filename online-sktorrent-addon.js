@@ -6,11 +6,15 @@ const { decode } = require("entities");
 
 const builder = addonBuilder({
     id: "org.stremio.sktonline",
-    version: "1.0.4",
+    version: "1.0.5",
     name: "SKTonline Online Streams",
     description: "Všetky streamy bez obmedzenia kvality z online.sktorrent.eu",
     types: ["movie", "series"],
-    catalogs: [], 
+    // OPRAVA: Katalógy nesmú byť prázdne, ak používame catalogHandler
+    catalogs: [
+        { type: "movie", id: "sktonline-movies", name: "SKTonline Filmy" },
+        { type: "series", id: "sktonline-series", name: "SKTonline Seriály" }
+    ],
     resources: ["stream"],
     idPrefixes: ["tt"]
 });
@@ -41,7 +45,6 @@ function formatStreamName(label) {
     if (l.includes("720") || l.includes("hd")) return "SKTonline 🟦 720p";
     if (l.includes("480") || l.includes("sd")) return "SKTonline 🟨 480p";
     if (l.includes("360") || l.includes("ld")) return "SKTonline 🟥 360p";
-    // Ak je label hocičo iné (napr. "Video", "MP4", "Vysoká"), vypíšeme ho
     return `SKTonline ⚪ ${label}`;
 }
 
@@ -61,20 +64,18 @@ async function getTitleFromIMDb(imdbId) {
         }
         return { title, originalTitle };
     } catch (err) {
-        console.error("[IMDb Error]", err.message);
         return null;
     }
 }
 
 async function searchOnlineVideos(query) {
     const searchUrl = `https://online.sktorrent.eu/search/videos?search_query=${encodeURIComponent(query)}`;
-    console.log(`[SEARCHING] ${searchUrl}`);
+    console.log(`[SEARCHING] ${query}`);
     try {
         const res = await axios.get(searchUrl, { headers: commonHeaders, timeout: 8000 });
         const $ = cheerio.load(res.data);
         const ids = [];
         
-        // Hľadáme linky, ktoré smerujú na video
         $("a[href*='/video/']").each((i, el) => {
             const href = $(el).attr("href");
             const match = href.match(/\/video\/(\d+)/);
@@ -96,15 +97,14 @@ async function extractStreams(videoId) {
         const flagIcons = flags.map(f => f === 'cz' ? '🇨🇿' : f === 'sk' ? '🇸🇰' : '🇬🇧').join(' ');
         
         const streams = [];
-
-        // Hľadáme všetky možné zdroje videa na stránke
         const sources = $('video source');
+
         if (sources.length > 0) {
             sources.each((i, el) => {
                 let src = $(el).attr('src');
                 let label = $(el).attr('label') || "Video";
                 if (src) {
-                    src = src.replace(/([^:])\/\/+/g, '$1/'); // Oprava URL
+                    src = src.replace(/([^:])\/\/+/g, '$1/');
                     streams.push({
                         name: formatStreamName(label),
                         title: `${pageTitle}\n${flagIcons}\nZdroj: SKTonline`,
@@ -112,14 +112,16 @@ async function extractStreams(videoId) {
                     });
                 }
             });
-        } else {
-            // Fallback pre prípady, kedy nie je <source> tag, ale len link
-            const directLink = $('a[href*="get_video"]').attr('href');
-            if (directLink) {
+        }
+
+        // Ak nie sú <source> tagy, skúsime nájsť akýkoľvek mp4 link alebo download link
+        if (streams.length === 0) {
+            const downloadLink = $('a[href*="get_video"]').attr('href');
+            if (downloadLink) {
                 streams.push({
                     name: "SKTonline ⚪ Prehrať",
                     title: `${pageTitle}\n${flagIcons}`,
-                    url: directLink.startsWith('http') ? directLink : `https://online.sktorrent.eu${directLink}`
+                    url: downloadLink.startsWith('http') ? downloadLink : `https://online.sktorrent.eu${downloadLink}`
                 });
             }
         }
@@ -136,19 +138,19 @@ builder.defineStreamHandler(async ({ type, id }) => {
     if (!info) return { streams: [] };
 
     const queries = new Set();
-    const cleanTitle = removeDiacritics(info.title);
-    const cleanOrig = removeDiacritics(info.originalTitle);
+    const t1 = removeDiacritics(info.title);
+    const t2 = removeDiacritics(info.originalTitle);
 
     if (type === 'series') {
         const s = season.padStart(2, '0');
         const e = episode.padStart(2, '0');
-        queries.add(`${cleanTitle} S${s}E${e}`);
-        queries.add(`${cleanOrig} S${s}E${e}`);
+        queries.add(`${t1} S${s}E${e}`);
+        queries.add(`${t2} S${s}E${e}`);
     } else {
-        // Pridáme verzie s číslom aj bez neho pre lepší zásah
-        queries.add(cleanTitle);
-        queries.add(cleanOrig);
-        if (cleanTitle.match(/\s\d$/)) queries.add(cleanTitle.replace(/\s\d$/, ""));
+        queries.add(t1);
+        queries.add(t2);
+        // Špeciálne pre Zootopia 2 a podobné: hľadaj presne s číslom
+        if (t1.match(/\d$/)) queries.add(t1);
     }
 
     let allStreams = [];
@@ -158,15 +160,17 @@ builder.defineStreamHandler(async ({ type, id }) => {
             const results = await extractStreams(vid);
             allStreams.push(...results);
         }
-        // Ak sme niečo našli pre prvý dotaz, nepokračujeme (optimalizácia)
         if (allStreams.length > 0) break;
     }
 
-    console.log(`[RESULT] Odosielam ${allStreams.length} streamov pre ${info.title}`);
+    console.log(`[RESULT] Nájdených ${allStreams.length} streamov pre: ${info.title}`);
     return { streams: allStreams };
 });
 
-// Oprava pre Render a Stremio
-builder.defineCatalogHandler(() => Promise.resolve({ metas: [] }));
+// OPRAVA: Musí existovať a vracať prázdny zoznam, aby Stremio nepadalo
+builder.defineCatalogHandler(({ type, id }) => {
+    return Promise.resolve({ metas: [] });
+});
 
 serveHTTP(builder.getInterface(), { port: 7000 });
+console.log("🚀 SKTonline Addon úspešne spustený na porte 7000");
